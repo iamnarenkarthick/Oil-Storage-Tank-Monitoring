@@ -1,85 +1,78 @@
-#include <WiFiManager.h>
-#include <WiFiClient.h>
-
-// ThingSpeak server and credentials
-const char *server = "api.thingspeak.com";
-const char *apiKey = "YOUR_THINGSPEAK_WRITE_API_KEY"; // Replace with your ThingSpeak Write API Key
+#include <WiFi.h>
+#include <ThingSpeak.h>
+#include <DallasTemperature.h>
+#include <OneWire.h>
+#include <NewPing.h>
 
 // Pin definitions
-#define FLOW_SENSOR_PIN 5 // Flow sensor pin (YF-S201)
-#define MOISTURE_SENSOR_PIN 4 // Moisture sensor pin
+#define ONE_WIRE_BUS 4     // DS18B20 data pin
+#define TRIGGER_PIN 12     // Trigger pin for ultrasonic sensor
+#define ECHO_PIN 13        // Echo pin for ultrasonic sensor
+#define MAX_DISTANCE 200   // Max distance to measure (in cm)
 
-// Variables
+// WiFi credentials and ThingSpeak API key
+#define WIFI_SSID "your_wifi_ssid"          // Replace with your WiFi SSID
+#define WIFI_PASSWORD "your_wifi_password"  // Replace with your WiFi password
+#define THINGSPEAK_API_KEY "UA529KDMFZGRN8F6"  // Replace with your ThingSpeak Write API Key
+
+// Initialize OneWire and DallasTemperature libraries
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// Initialize ultrasonic sensor
+NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
+
+// Initialize WiFi and ThingSpeak
 WiFiClient client;
-volatile int flowCount = 0;
-int tankFillCount = 0;
-int moistureLevel = 0;
-unsigned long previousMillis = 0;
-const long interval = 15000; // ThingSpeak requires at least a 15-second delay
-
-// Interrupt function for the flow sensor
-void IRAM_ATTR flowSensorInterrupt() {
-  flowCount++;
-}
 
 void setup() {
   Serial.begin(115200);
+  sensors.begin();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  // Setup WiFiManager
-  WiFiManager wifiManager;
-  wifiManager.autoConnect("ThingSpeak_AP"); // Captive portal for WiFi credentials
+  // Wait for WiFi to connect
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.println("Connecting to WiFi...");
+  }
+
+  ThingSpeak.begin(client);  // Initialize ThingSpeak
   Serial.println("Connected to WiFi");
-
-  // Initialize sensors
-  pinMode(FLOW_SENSOR_PIN, INPUT);
-  pinMode(MOISTURE_SENSOR_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), flowSensorInterrupt, FALLING);
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
+  // Request temperature data from DS18B20 sensor
+  sensors.requestTemperatures();
+  float temperature = sensors.getTempCByIndex(0);
 
-  // Check if it's time to send data
-  if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
+  // Get oil level data (distance measurement) from ultrasonic sensor
+  float distance = sonar.ping_cm();
 
-    // Calculate water usage
-    float flowRate = flowCount / 7.5; // Calibration factor for YF-S201 flow sensor
-    flowCount = 0; // Reset flow count after calculation
+  if (temperature == DEVICE_DISCONNECTED_C || distance == 0) {
+    Serial.println("Failed to read from sensors");
+  } else {
+    // Print values to Serial Monitor for debugging
+    Serial.print("Temperature: ");
+    Serial.print(temperature);
+    Serial.print(" °C, ");
+    Serial.print("Oil Level (Distance): ");
+    Serial.print(distance);
+    Serial.println(" cm");
 
-    // Read moisture sensor (for tank fills)
-    moistureLevel = analogRead(MOISTURE_SENSOR_PIN);
-    if (moistureLevel < 500) { // Assuming below 500 means tank is filled
-      tankFillCount++;
-    }
+    // Update ThingSpeak with sensor data
+    ThingSpeak.setField(1, temperature);  // Field 1 for Temperature
+    ThingSpeak.setField(2, distance);     // Field 2 for Oil Level (Distance)
 
-    // Debugging data
-    Serial.print("Flow Rate: ");
-    Serial.print(flowRate);
-    Serial.print(" L/min, Tank Fills: ");
-    Serial.println(tankFillCount);
+    // Write to ThingSpeak every 15 seconds
+    int responseCode = ThingSpeak.writeFields(THINGSPEAK_API_KEY);
 
-    // Prepare HTTP POST data
-    String postStr = "api_key=";
-    postStr += apiKey;
-    postStr += "&field1=" + String(flowRate);     // Field 1: Water usage
-    postStr += "&field2=" + String(tankFillCount); // Field 2: Tank fills
-
-    // Send data to ThingSpeak
-    if (client.connect(server, 80)) {
-      Serial.println("Connected to ThingSpeak");
-      client.println("POST /update HTTP/1.1");
-      client.println("Host: api.thingspeak.com");
-      client.println("Connection: close");
-      client.println("Content-Type: application/x-www-form-urlencoded");
-      client.print("Content-Length: ");
-      client.println(postStr.length());
-      client.println();
-      client.print(postStr);
-      Serial.println("Data sent to ThingSpeak");
+    if (responseCode == 200) {
+      Serial.println("Data successfully sent to ThingSpeak.");
     } else {
-      Serial.println("Failed to connect to ThingSpeak");
+      Serial.print("Failed to send data. Error code: ");
+      Serial.println(responseCode);
     }
-    client.stop(); // Close the connection
+
+    delay(15000);  // 15 seconds delay before sending next data
   }
 }
